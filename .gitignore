@@ -87,3 +87,6 @@ Desktop.ini
 # Build outputs
 build/
 out/
+
+# Bolt configuration
+.bolt/
