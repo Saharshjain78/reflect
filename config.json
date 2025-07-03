@@ -1,0 +1,11 @@
+{
+    "hotkey": "ctrl+alt+d",
+    "chunk_duration": 5,
+    "sample_rate": 16000,
+    "whisper_model": "small",
+    "use_fp16": false,
+    "gemini_model": "gemini-pro",
+    "format_mode": "general",
+    "gui_theme": "light",
+    "log_level": "INFO"
+}

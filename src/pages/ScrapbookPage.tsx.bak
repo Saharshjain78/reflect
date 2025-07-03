@@ -1,0 +1,1457 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { Save, Download, ArrowLeft, Plus, Image, Mic, Film, Play, Pause, Square, Circle, Trash2 } from 'lucide-react';
+import html2canvas from 'html2canvas';
+import Button from '../components/ui/Button';
+import Card, { CardHeader, CardBody, CardFooter } from '../components/ui/Card';
+import { useJournal } from '../contexts/JournalContext';
+import { JournalEntry } from '../types';
+import LoadingSpinner from '../components/ui/LoadingSpinner';
+
+interface ScrapbookItem {
+  id: string;
+  type: 'image' | 'video' | 'audio';
+  url: string;
+  position: { x: number; y: number };
+  rotation: number;
+  scale: number;
+  zIndex: number;
+  isPlaying?: boolean;
+  frameStyle?: 'circle' | 'square' | 'polaroid' | 'vintage';
+  originalSize?: boolean;
+}
+
+// Add touch-specific optimizations via CSS
+const touchOptimizationStyles = `
+  .touch-optimized {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+  @media (pointer: coarse) {
+    .touch-target {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+`;
+
+// Mobile swipe gesture tips component that shows initially on mobile and disappears after first interaction
+const MobileSwipeTips = () => {
+  const [isVisible, setIsVisible] = useState(true);
+
+  useEffect(() => {
+    // Hide tips after 6 seconds
+    const timer = setTimeout(() => {
+      setIsVisible(false);
+    }, 6000);
+    
+    return () => clearTimeout(timer);
+  }, []);
+  
+  if (!isVisible) return null;
+
+  return (
+    <div className="fixed inset-x-0 bottom-20 flex justify-center z-50 pointer-events-none sm:hidden">
+      <div className="bg-black bg-opacity-75 text-white p-3 rounded-lg shadow-lg backdrop-blur-sm max-w-xs text-center">
+        <div className="text-sm font-medium mb-2">Swipe gestures available!</div>
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="flex flex-col items-center">
+            <div className="flex items-center mb-1">
+              <span className="mr-1">←</span>
+              <span className="mr-1">→</span>
+            </div>
+            <span>Rotate item</span>
+          </div>
+          <div className="flex flex-col items-center">
+            <div className="flex items-center mb-1">
+              <span className="mr-1">↑</span>
+              <span className="mr-1">↓</span>
+            </div>
+            <span>Resize item</span>
+          </div>
+        </div>
+        <button 
+          onClick={() => setIsVisible(false)} 
+          className="mt-2 text-xs text-gray-200 pointer-events-auto"
+        >
+          Got it
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const ScrapbookPage: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { getEntry, updateEntry, uploadMedia, isLoading } = useJournal();
+  const [entry, setEntry] = useState<JournalEntry | null>(null);
+  const [scrapbookItems, setScrapbookItems] = useState<ScrapbookItem[]>([]);
+  const [draggedItem, setDraggedItem] = useState<string | null>(null);  
+  const [isSaving, setIsSaving] = useState(false);
+  
+  // Add a style element reference for touch optimizations
+  const styleRef = useRef<HTMLStyleElement | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [audioRecording, setAudioRecording] = useState<MediaRecorder | null>(null);
+  const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [recordingInterval, setRecordingInterval] = useState<number | null>(null);
+  const [defaultFrameStyle, setDefaultFrameStyle] = useState<'circle' | 'square' | 'polaroid' | 'vintage'>('circle');
+  const [useOriginalSize, setUseOriginalSize] = useState<boolean>(false);
+  const [uploadStatus, setUploadStatus] = useState<{
+    type: 'info' | 'warning' | 'error' | 'success' | null;
+    message: string;
+  }>({ type: null, message: '' });
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [scrapbookOrientation, setScrapbookOrientation] = useState<'landscape' | 'portrait'>('landscape');
+  const [scrapbookProportion, setScrapbookProportion] = useState<number>(0.7); // 70% default size
+  
+  const scrapbookRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Audio elements will be created dynamically
+  // Add touch gesture support for mobile users
+  const [touchStartPos, setTouchStartPos] = useState<{ x: number, y: number } | null>(null);
+  const [touchEndPos, setTouchEndPos] = useState<{ x: number, y: number } | null>(null);
+  const [activeItemId, setActiveItemId] = useState<string | null>(null);
+  
+  // Check if we're on a touch device
+  const isTouchDevice = () => {
+    return (('ontouchstart' in window) ||
+       (navigator.maxTouchPoints > 0));
+  };
+  
+  // Handle swipe gestures on mobile
+  const handleTouchStart = (e: React.TouchEvent, itemId?: string) => {
+    if (itemId) {
+      setActiveItemId(itemId);
+    }
+    
+    const touch = e.touches[0];
+    setTouchStartPos({
+      x: touch.clientX,
+      y: touch.clientY
+    });
+  };
+  
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (!touchStartPos) return;
+    
+    const touch = e.changedTouches[0];
+    setTouchEndPos({
+      x: touch.clientX,
+      y: touch.clientY
+    });
+    
+    // Process the swipe
+    if (touchStartPos && activeItemId) {
+      const deltaX = touch.clientX - touchStartPos.x;
+      const deltaY = touch.clientY - touchStartPos.y;
+      
+      // Check if it's a horizontal swipe (more horizontal than vertical)
+      if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 50) {
+        // Right swipe - rotate right
+        if (deltaX > 0) {
+          handleRotateItem(activeItemId, 'right');
+        } 
+        // Left swipe - rotate left
+        else {
+          handleRotateItem(activeItemId, 'left');
+        }
+      } 
+      // Check if it's a vertical swipe
+      else if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > 50) {
+        // Up swipe - increase scale
+        if (deltaY < 0) {
+          handleScaleItem(activeItemId, 0.1);
+        } 
+        // Down swipe - decrease scale
+        else {
+          handleScaleItem(activeItemId, -0.1);
+        }
+      }
+    }
+    
+    // Reset touch tracking
+    setTouchStartPos(null);
+    setTouchEndPos(null);
+    setActiveItemId(null);
+  };
+
+  // Fetch entry data
+  useEffect(() => {
+    const loadEntry = async () => {
+      if (id) {
+        const fetchedEntry = await getEntry(id);
+        if (fetchedEntry) {          setEntry(fetchedEntry);
+          
+          // Initialize orientation and proportion from saved layout
+          if (fetchedEntry.scrapbookLayout) {
+            if (fetchedEntry.scrapbookLayout.orientation) {
+              setScrapbookOrientation(fetchedEntry.scrapbookLayout.orientation);
+            }
+            if (fetchedEntry.scrapbookLayout.proportion) {
+              setScrapbookProportion(fetchedEntry.scrapbookLayout.proportion);
+            }
+          }
+          
+          // Initialize scrapbook items from entry media
+          if (fetchedEntry.media && fetchedEntry.media.length > 0) {const initialItems = fetchedEntry.media.map((media, index) => ({
+              id: media.id,
+              type: media.type as 'image' | 'video' | 'audio', 
+              url: media.url,
+              position: media.position || { 
+                x: 100 + (index % 3) * 150, 
+                y: 100 + Math.floor(index / 3) * 150 
+              },
+              rotation: media.rotation || (Math.random() * 10 - 5),
+              scale: media.scale || 1,
+              zIndex: media.zIndex || index + 1,
+              isPlaying: false,
+              frameStyle: media.frameStyle || defaultFrameStyle,
+              originalSize: media.originalSize || false
+            }));
+            
+            setScrapbookItems(initialItems);
+          }
+        } else {
+          // Entry not found, redirect
+          navigate('/journal');
+        }
+      }
+    };
+    
+    loadEntry();
+  }, [id, getEntry, navigate, defaultFrameStyle]);  // Clean up media elements when component unmounts
+  useEffect(() => {
+    return () => {
+      // Stop any playing audio or video when component unmounts
+      scrapbookItems.forEach(item => {
+        if (item.type === 'audio' && item.isPlaying) {
+          const audioElement = document.getElementById(`audio-${item.id}`) as HTMLAudioElement;
+          if (audioElement) {
+            audioElement.pause();
+            audioElement.currentTime = 0;
+          }
+        }
+        
+        if (item.type === 'video' && item.isPlaying) {
+          const videoElement = document.getElementById(`video-${item.id}`) as HTMLVideoElement;
+          if (videoElement) {
+            videoElement.pause();
+            videoElement.currentTime = 0;
+          }
+        }
+      });
+
+      // Clean up audio recording if active
+      if (audioRecording) {
+        audioRecording.stream.getTracks().forEach(track => track.stop());
+      }
+      
+      // Clear recording timer interval if active
+      if (recordingInterval) {
+        clearInterval(recordingInterval);
+      }
+    };
+  }, [scrapbookItems, audioRecording, recordingInterval]);
+
+  // Add resize event listener to update scrapbook container dimensions
+  useEffect(() => {
+    const handleResize = () => {
+      if (scrapbookRef.current) {
+        // Force a re-render when window is resized
+        setScrapbookProportion(prev => {
+          // This trick forces a re-render without actually changing the value
+          return Number(prev.toFixed(2));
+        });
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+  const handleDragStart = (itemId: string, e: React.MouseEvent | React.Touch) => {
+    setDraggedItem(itemId);
+    setIsDragging(true);
+    
+    // Find the item and update its z-index to bring it to front
+    setScrapbookItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        return { ...item, zIndex: Math.max(...prev.map(i => i.zIndex)) + 1 };
+      }
+      return item;
+    }));
+    
+    // Prevent default behavior on mobile to avoid text selection issues
+    if ('preventDefault' in e) {
+      e.preventDefault();
+    }
+  };
+  
+  const handleDragMove = (e: React.MouseEvent) => {
+    if (!isDragging || !draggedItem || !scrapbookRef.current) return;
+    
+    const scrapbookRect = scrapbookRef.current.getBoundingClientRect();
+    const x = e.clientX - scrapbookRect.left;
+    const y = e.clientY - scrapbookRect.top;
+    
+    // Add bounds checking to prevent dragging items entirely off-canvas
+    const boundedX = Math.max(0, Math.min(x, scrapbookRect.width));
+    const boundedY = Math.max(0, Math.min(y, scrapbookRect.height));
+    
+    setScrapbookItems(prev => prev.map(item => {
+      if (item.id === draggedItem) {
+        return { ...item, position: { x: boundedX, y: boundedY } };
+      }
+      return item;
+    }));
+  };
+  
+  const handleDragEnd = () => {
+    setDraggedItem(null);
+    setIsDragging(false);
+  };
+
+  // Display warning for large files
+  const displayFileSizeWarning = (size: number) => {
+    const sizeMB = Math.round(size / (1024 * 1024));
+    
+    if (sizeMB > 100) {
+      alert(`Warning: You're uploading a large file (${sizeMB}MB). This might take a while depending on your internet connection. Please be patient during the upload.`);
+    }
+  };
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || !e.target.files[0] || !id) return;
+    
+    try {
+      const file = e.target.files[0];
+      
+      // More detailed file type checking
+      const isImage = file.type.startsWith('image/');
+      const isVideo = file.type.startsWith('video/');
+      const isAudio = file.type.startsWith('audio/');
+      
+      // Check supported file formats more specifically
+      // Common image formats
+      const supportedImageFormats = [
+        'image/jpeg', 'image/png', 'image/gif', 'image/webp', 
+        'image/bmp', 'image/tiff', 'image/svg+xml', 'image/heic', 
+        'image/jfif', 'image/avif'
+      ];
+      
+      // Common video formats
+      const supportedVideoFormats = [
+        'video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 
+        'video/x-ms-wmv', 'video/mpeg', 'video/3gpp', 'video/ogg', 
+        'video/x-flv', 'video/x-matroska'
+      ];
+      
+      // Common audio formats
+      const supportedAudioFormats = [
+        'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+        'audio/aac', 'audio/flac', 'audio/mp4'
+      ];
+      
+      // Check if file type is unsupported
+      if (!isImage && !isVideo && !isAudio) {
+        alert('Please upload an image, video, or audio file.');
+        return;
+      }
+      
+      // Check if specific format is supported
+      if (
+        (isImage && !supportedImageFormats.includes(file.type)) ||
+        (isVideo && !supportedVideoFormats.includes(file.type)) ||
+        (isAudio && !supportedAudioFormats.includes(file.type))
+      ) {
+        alert(`File format "${file.type}" may not be supported. If the upload fails, please try converting to a more common format.`);
+        // Continue anyway - it might work
+      }
+      
+      // Only allow audio if recording mode is active
+      if (isAudio && !isRecordingAudio) {
+        alert('Please use the "Record Audio" button to create audio recordings.');
+        return;
+      }
+      
+      // Check file size limitations
+      const maxSizeMB = 500; // Increased limit to 500MB for all file types
+      const maxSizeBytes = maxSizeMB * 1024 * 1024;
+      
+      if (file.size > maxSizeBytes) {
+        alert(`File size too large. Please upload a file smaller than ${maxSizeMB}MB.`);
+        return;
+      }
+
+      // Display warning for large files
+      displayFileSizeWarning(file.size);
+      
+      // Show temporary loading state
+      setIsSaving(true);
+      
+      try {
+        // Upload the file
+        const media = await uploadMedia(id, file);
+        
+        // Add to scrapbook
+        const newItem: ScrapbookItem = {
+          id: media.id,
+          type: media.type as 'image' | 'video' | 'audio',
+          url: media.url,
+          position: { 
+            x: 100 + (Math.random() * 200), 
+            y: 100 + (Math.random() * 200) 
+          },
+          rotation: Math.random() * 10 - 5,
+          scale: 1,
+          zIndex: Math.max(0, ...scrapbookItems.map(i => i.zIndex)) + 1,
+          isPlaying: false,
+          frameStyle: defaultFrameStyle,
+          originalSize: useOriginalSize
+        };
+        
+        setScrapbookItems(prev => [...prev, newItem]);
+      } catch (uploadError: any) {
+        console.error('Upload failed:', uploadError);
+        
+        // Provide more helpful error messages based on error type and file characteristics
+        let errorMessage = 'Upload failed. ';
+        
+        // Check if it's a network error
+        if (!navigator.onLine) {
+          errorMessage += 'You appear to be offline. Please check your internet connection.';
+        }
+        // Check for file format/corruption issues
+        else if (uploadError.message && uploadError.message.includes('Failed to read file')) {
+          errorMessage += 'The file appears to be corrupted or in an unsupported format. Please try with a different file or convert it to another format.';
+        }
+        // Check if using browser storage and it might be full
+        else if (uploadError.name === 'QuotaExceededError' || 
+                (uploadError.message && uploadError.message.toLowerCase().includes('quota'))) {
+          errorMessage += 'Your browser storage is full. Try clearing some browser data or using a smaller file.';
+        }
+        // Check for CORS issues with remote files
+        else if (uploadError.name === 'SecurityError' || 
+                (uploadError.message && uploadError.message.toLowerCase().includes('cross-origin'))) {
+          errorMessage += 'There was a security issue processing this file. Try downloading it first and then uploading the local copy.';
+        }
+        // Error specific to very large files
+        else if (file.size > 100 * 1024 * 1024) { // If file is larger than 100MB
+          errorMessage += 'This could be due to the large file size. Try using a smaller file, compressing it, or converting to a more efficient format.';
+        }
+        // File format suggestions
+        else if (isImage) {
+          errorMessage += 'Try saving the image as JPG or PNG and upload again. Images with transparency should use PNG format.';
+        }
+        else if (isVideo) {
+          errorMessage += 'Try converting the video to MP4 (H.264) format, which is widely supported.';
+        } 
+        else if (isAudio) {
+          errorMessage += 'Try converting the audio to MP3 or WAV format, which are widely supported.';
+        }
+        // Default message with more actionable feedback
+        else {
+          errorMessage += 'Please try again with a different file or format. The most widely supported formats are JPG, PNG, MP4, and MP3.';
+        }
+        
+        alert(errorMessage);
+      }
+      
+    } catch (error) {
+      console.error('File handling error:', error);
+      alert('Failed to process file. Please check that the file isn\'t corrupted and is in a common format like JPG, PNG, MP4, or MP3.');
+    } finally {
+      // Reset file input and loading state
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      setIsSaving(false);
+    }
+  };
+  
+  const handleRotateItem = (itemId: string, direction: 'left' | 'right') => {
+    setScrapbookItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        const rotationChange = direction === 'left' ? -5 : 5;
+        return { ...item, rotation: item.rotation + rotationChange };
+      }
+      return item;
+    }));
+  };
+  
+  const handleScaleItem = (itemId: string, change: number) => {
+    setScrapbookItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        const newScale = Math.max(0.5, Math.min(2, item.scale + change));
+        return { ...item, scale: newScale };
+      }
+      return item;
+    }));
+  };
+    // Handle changing frame style for an item
+  const handleFrameStyleChange = (itemId: string, style: 'circle' | 'square' | 'polaroid' | 'vintage') => {
+    setScrapbookItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        return { ...item, frameStyle: style };
+      }
+      return item;
+    }));
+  };
+  
+  // Toggle original size for an item
+  const toggleOriginalSize = (itemId: string) => {
+    setScrapbookItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        return { ...item, originalSize: !item.originalSize };
+      }
+      return item;
+    }));
+  };
+
+  // Audio playback controls
+  const handleToggleAudio = (itemId: string) => {
+    setScrapbookItems(prev => {
+      const updatedItems = prev.map(item => {
+        // Turn off all other playing audio first
+        if (item.type === 'audio' && item.id !== itemId) {
+          return { ...item, isPlaying: false };
+        }
+        
+        // Toggle the target audio
+        if (item.id === itemId && item.type === 'audio') {
+          return { ...item, isPlaying: !item.isPlaying };
+        }
+        
+        return item;
+      });
+      
+      // Get the audio element for this item
+      const audioItem = document.querySelector(`#audio-${itemId}`) as HTMLAudioElement;
+      if (audioItem) {
+        const isNowPlaying = updatedItems.find(item => item.id === itemId)?.isPlaying;
+        if (isNowPlaying) {
+          audioItem.play();
+        } else {
+          audioItem.pause();
+          audioItem.currentTime = 0;
+        }
+      }
+      
+      return updatedItems;
+    });
+  };
+  // Audio recording functionality
+  const startAudioRecording = async () => {
+    try {
+      // Clear any existing interval first
+      if (recordingInterval) {
+        clearInterval(recordingInterval);
+        setRecordingInterval(null);
+      }
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      
+      setAudioRecording(recorder);
+      setAudioChunks([]);
+      setIsRecordingAudio(true);
+      setRecordingTime(0);
+      
+      // Start recording timer
+      const interval = window.setInterval(() => {
+        setRecordingTime(prevTime => prevTime + 1);
+      }, 1000);
+      
+      setRecordingInterval(interval);
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          setAudioChunks(prev => [...prev, e.data]);
+        }
+      };
+        // Configure regular data chunks for better responsive feedback
+      recorder.start(1000); // Capture in 1-second chunks
+      
+    } catch (error) {
+      console.error('Error starting audio recording:', error);
+      alert('Failed to start recording. Please check your microphone permissions.');
+    }
+  };
+    const stopAudioRecording = async () => {
+    if (audioRecording && id) {
+      try {
+        // Clear recording timer first
+        if (recordingInterval) {
+          clearInterval(recordingInterval);
+          setRecordingInterval(null);
+        }
+        
+        // Stop the recording
+        audioRecording.stop();
+        
+        // Wait for the chunks to be available
+        audioRecording.onstop = async () => {
+          try {
+            // Create a blob with the audio data
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            const audioFile = new File([audioBlob], "audio-recording.webm", { type: 'audio/webm' });
+              // Calculate a random position for the new audio item
+            const tempPosition = { 
+              x: 100 + (Math.random() * 200), 
+              y: 100 + (Math.random() * 200) 
+            };
+            
+            // Upload the recording
+            const media = await uploadMedia(id, audioFile);
+              // Add to scrapbook
+            const newItem: ScrapbookItem = {
+              id: media.id,
+              type: 'audio',
+              url: media.url,
+              position: tempPosition,
+              rotation: Math.random() * 10 - 5,
+              scale: 1,
+              zIndex: Math.max(0, ...scrapbookItems.map(i => i.zIndex)) + 1,
+              isPlaying: false,
+              frameStyle: defaultFrameStyle,
+              originalSize: useOriginalSize
+            };
+            
+            // Add the new item to the scrapbook
+            setScrapbookItems(prev => [...prev, newItem]);
+            
+          } catch (error) {
+            console.error('Failed to save audio recording:', error);
+            alert('Failed to save audio recording. Please try again.');
+          } finally {
+            // Clean up
+            setIsRecordingAudio(false);
+            setAudioRecording(null);
+            setAudioChunks([]);
+            setRecordingTime(0);
+          }
+        };
+        
+        // Clean up the media stream
+        audioRecording.stream.getTracks().forEach(track => track.stop());
+        
+      } catch (error) {
+        console.error('Error stopping audio recording:', error);
+        
+        // Clean up on error
+        setIsRecordingAudio(false);
+        setAudioRecording(null);
+        setAudioChunks([]);
+        setRecordingTime(0);
+        
+        // Clear interval if it exists
+        if (recordingInterval) {
+          clearInterval(recordingInterval);
+          setRecordingInterval(null);
+        }
+      }
+    }
+  };
+  
+  const handleSaveScrapbook = async () => {
+    if (!id || !entry) return;
+    
+    setIsSaving(true);
+    
+    try {
+      // Update the entry with the scrapbook layout
+      const updatedMedia = entry.media?.map(media => {
+        const scrapbookItem = scrapbookItems.find(item => item.id === media.id);
+        if (scrapbookItem) {          return {
+            ...media,
+            type: scrapbookItem.type,
+            position: scrapbookItem.position,
+            rotation: scrapbookItem.rotation,
+            scale: scrapbookItem.scale,
+            zIndex: scrapbookItem.zIndex,
+            isPlaying: false,
+            frameStyle: scrapbookItem.frameStyle,
+            originalSize: scrapbookItem.originalSize
+          };
+        }
+        return media;
+      });
+        await updateEntry(id, { 
+        media: updatedMedia,
+        scrapbookLayout: {
+          items: scrapbookItems,
+          orientation: scrapbookOrientation,
+          proportion: scrapbookProportion
+        }
+      });
+      
+      // Navigate back to the entry detail page
+      navigate(`/entries/${id}`);
+      
+    } catch (error) {
+      console.error('Failed to save scrapbook', error);
+      alert('Failed to save scrapbook. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+    const handleSaveAsImage = async () => {
+    if (!scrapbookRef.current) return;
+    
+    try {
+      // Show loading state
+      setIsSaving(true);
+      
+      // Temporarily hide the controls while capturing
+      const controls = scrapbookRef.current.querySelectorAll('.item-controls');
+      controls.forEach(control => {
+        (control as HTMLElement).style.visibility = 'hidden';
+      });
+      
+      // Use html2canvas to capture the scrapbook
+      const canvas = await html2canvas(scrapbookRef.current, {
+        backgroundColor: '#f9fafb', // Light mode background
+        scale: 2, // Higher resolution
+        logging: false,
+        allowTaint: true,
+        useCORS: true
+      });
+      
+      // Show controls again
+      controls.forEach(control => {
+        (control as HTMLElement).style.visibility = 'visible';
+      });
+      
+      // Create a download link
+      const link = document.createElement('a');
+      link.download = `scrapbook-${id}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch (error) {
+      console.error('Failed to export image:', error);
+      alert('Failed to export image. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Delete an item from the scrapbook
+  const handleDeleteItem = (itemId: string) => {
+    if (window.confirm('Are you sure you want to delete this item?')) {
+      setScrapbookItems(prev => prev.filter(item => item.id !== itemId));
+      
+      // If this is an audio or video that's playing, make sure to stop it first
+      const audioElement = document.getElementById(`audio-${itemId}`) as HTMLAudioElement;
+      if (audioElement) {
+        audioElement.pause();
+      }
+      
+      const videoElement = document.getElementById(`video-${itemId}`) as HTMLVideoElement;
+      if (videoElement) {
+        videoElement.pause();
+      }
+    }
+  };
+  
+  if (isLoading || !entry) {
+    return <LoadingSpinner />;
+  }
+    return (
+    <div className="max-w-4xl mx-auto px-4 sm:px-6">
+      <MobileSwipeTips />
+      <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <button 
+          onClick={() => navigate(`/entries/${id}`)}
+          className="flex items-center text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+        >
+          <ArrowLeft size={20} className="mr-1" />
+          <span>Back to Entry</span>
+        </button>
+        
+        <div className="flex gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            leftIcon={<Download size={16} />}
+            onClick={handleSaveAsImage}
+            className="text-sm"
+            size="sm"
+          >
+            Export
+          </Button>
+          
+          <Button
+            variant="primary"
+            leftIcon={<Save size={16} />}
+            onClick={handleSaveScrapbook}
+            isLoading={isSaving}
+            className="text-sm"
+            size="sm"
+          >
+            Save
+          </Button>
+        </div>
+      </div>
+        <Card className="mb-8">
+        <CardHeader>
+          <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+            <h1 className="text-2xl font-serif font-bold">
+              Scrapbook Gallery
+            </h1>            
+            <div className="flex flex-col space-y-2">
+              <div className="w-full text-sm text-gray-500 dark:text-gray-400 mb-1">
+                Default frame style for new items:
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant={defaultFrameStyle === 'circle' ? 'primary' : 'outline'}
+                  leftIcon={<Circle size={16} />}
+                  onClick={() => setDefaultFrameStyle('circle')}
+                  size="sm"
+                  className="text-xs"
+                >
+                  Circle
+                </Button>
+                <Button
+                  variant={defaultFrameStyle === 'square' ? 'primary' : 'outline'}
+                  leftIcon={<Square size={16} />}
+                  onClick={() => setDefaultFrameStyle('square')}
+                  size="sm"
+                  className="text-xs"
+                >
+                  Square
+                </Button>
+                <Button
+                  variant={defaultFrameStyle === 'polaroid' ? 'primary' : 'outline'}
+                  onClick={() => setDefaultFrameStyle('polaroid')}
+                  size="sm"
+                  className="text-xs"
+                >
+                  Polaroid
+                </Button>
+                <Button
+                  variant={defaultFrameStyle === 'vintage' ? 'primary' : 'outline'}
+                  onClick={() => setDefaultFrameStyle('vintage')}
+                  size="sm"
+                  className="text-xs"
+                >
+                  Vintage
+                </Button>
+              </div>
+                <div className="w-full mt-3">                <label className="flex items-center space-x-2 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={useOriginalSize} 
+                    onChange={() => setUseOriginalSize(!useOriginalSize)}
+                    className="form-checkbox h-4 w-4 text-primary-500 rounded border-gray-300 focus:ring-primary-500"
+                  />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    Use original size for new images and videos
+                  </span>
+                </label>
+                {useOriginalSize && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">
+                    ℹ️ Media will be added with its actual dimensions. You can still resize using the scale controls.
+                  </p>
+                )}
+              </div>
+                <div className="w-full mt-5 border-t border-gray-200 dark:border-gray-700 pt-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">
+                      Scrapbook orientation:
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant={scrapbookOrientation === 'landscape' ? 'primary' : 'outline'}
+                        onClick={() => setScrapbookOrientation('landscape')}
+                        size="sm"
+                        title="Wider than tall"
+                        className="text-xs flex-1"
+                      >
+                        Landscape
+                      </Button>
+                      <Button
+                        variant={scrapbookOrientation === 'portrait' ? 'primary' : 'outline'}
+                        onClick={() => setScrapbookOrientation('portrait')}
+                        size="sm"
+                        title="Taller than wide"
+                        className="text-xs flex-1"
+                      >
+                        Portrait
+                      </Button>
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm text-gray-500 dark:text-gray-400 mb-2">
+                      Scrapbook size: {Math.round(scrapbookProportion * 100)}%
+                    </label>
+                    <input
+                      type="range"
+                      min="0.3"
+                      max="0.95"
+                      step="0.05"
+                      value={scrapbookProportion}
+                      onChange={(e) => setScrapbookProportion(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
+                    />
+                    <div className="flex justify-between text-xs text-gray-500 mt-1">
+                      <span>Smaller</span>
+                      <span>Larger</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>          </div>
+        </CardHeader>
+        
+        <CardBody className="p-2 sm:p-4">
+          {/* Scrapbook canvas area */}          
+          <div className="flex justify-center overflow-hidden">
+            <div 
+              ref={scrapbookRef}
+              className={`
+                relative bg-gray-50 dark:bg-gray-800 rounded-lg border-2 border-dashed 
+                border-gray-300 dark:border-gray-600 p-2 sm:p-4 mx-auto
+                ${scrapbookOrientation === 'landscape' ? 'w-full max-w-4xl' : 'w-full max-w-2xl'}
+                touch-manipulation
+              `}              
+              style={{
+                height: scrapbookOrientation === 'landscape' 
+                  ? `${Math.max(300, Math.min(500, (typeof window !== 'undefined' ? window.innerHeight : 800) * scrapbookProportion))}px` 
+                  : `${Math.max(400, Math.min(700, (typeof window !== 'undefined' ? window.innerHeight : 800) * scrapbookProportion))}px`,
+                width: scrapbookOrientation === 'landscape'
+                  ? `${Math.max(280, Math.min(640, (typeof window !== 'undefined' ? window.innerWidth - 40 : 1200) * scrapbookProportion))}px`
+                  : `${Math.max(240, Math.min(480, (typeof window !== 'undefined' ? window.innerWidth - 40 : 1200) * scrapbookProportion * 0.75))}px`,
+                overflowX: 'hidden'
+              }}
+              onMouseMove={handleDragMove}
+              onMouseUp={handleDragEnd}
+              onMouseLeave={handleDragEnd}              onTouchMove={(e) => {
+                // Handle touch movement for mobile devices
+                if (isDragging && draggedItem && e.touches[0]) {
+                  const touch = e.touches[0];
+                  const scrapbookRect = scrapbookRef.current?.getBoundingClientRect();
+                  if (scrapbookRect) {
+                    const x = touch.clientX - scrapbookRect.left;
+                    const y = touch.clientY - scrapbookRect.top;
+                    
+                    // Add bounds checking to prevent dragging items entirely off-canvas
+                    const boundedX = Math.max(0, Math.min(x, scrapbookRect.width));
+                    const boundedY = Math.max(0, Math.min(y, scrapbookRect.height));
+                    
+                    setScrapbookItems(prev => prev.map(item => {
+                      if (item.id === draggedItem) {
+                        return { ...item, position: { x: boundedX, y: boundedY } };
+                      }
+                      return item;
+                    }));
+                  }
+                  e.preventDefault(); // Prevent scrolling while dragging
+                }
+              }}
+              onTouchEnd={(e) => {
+                setDraggedItem(null);
+                setIsDragging(false);
+                // Prevent any default touch behavior like tap highlighting
+                e.preventDefault();
+              }}
+              style={{
+                touchAction: 'none', // Disable browser's default touch actions in the scrapbook area
+                WebkitTapHighlightColor: 'transparent', // Remove tap highlight on iOS
+              }}
+            >            {scrapbookItems.length === 0 ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400">
+                <div className="mb-3">
+                  <Plus size={40} strokeWidth={1} />
+                </div>
+                <p className="mb-2">Your gallery wall is empty</p>
+                <p className="text-sm">Upload images, videos, or record audio to decorate your scrapbook</p>
+              </div>
+            ) : (
+              <>
+                {scrapbookItems.map(item => (<div
+                  key={item.id}
+                  className="absolute cursor-move shadow-md hover:shadow-xl transition-all duration-300"
+                  style={{
+                    left: item.position.x,
+                    top: item.position.y,
+                    transform: `rotate(${item.rotation}deg) scale(${item.scale})`,
+                    zIndex: item.zIndex,
+                    borderRadius: item.frameStyle === 'circle' ? '50%' : '0',
+                    transition: draggedItem === item.id ? 'none' : 'transform 0.2s ease-out'
+                  }}
+                >
+                  <div 
+                    className="relative touch-manipulation"
+                    onMouseDown={(e) => handleDragStart(item.id, e)}
+                    onTouchStart={(e) => {
+                      if (e.touches[0]) {
+                        handleDragStart(item.id, e.touches[0] as any);
+                      }
+                      handleTouchStart(e, item.id);
+                    }}
+                    onTouchEnd={handleTouchEnd}
+                  >{item.type === 'image' ? (                      <div className={`
+                        overflow-hidden 
+                        ${item.frameStyle === 'circle' ? 'rounded-full' : ''}
+                        ${item.frameStyle === 'square' ? 'rounded-lg' : ''}
+                        ${item.frameStyle === 'polaroid' ? 'rounded-sm pb-8 bg-white dark:bg-gray-200' : ''}
+                        ${item.frameStyle === 'vintage' ? 'rounded-sm transform rotate-1' : ''}
+                        ${['circle', 'square'].includes(item.frameStyle || '') ? 'border-4 border-white dark:border-gray-700' : ''}
+                        ${item.frameStyle === 'polaroid' ? 'shadow-xl' : ''}
+                        ${item.frameStyle === 'vintage' ? 'border-8 border-white dark:border-gray-200 shadow-xl' : ''}
+                      `} 
+                      style={{ 
+                        width: item.originalSize ? 'auto' : (item.frameStyle === 'polaroid' ? '220px' : '200px'), 
+                        height: item.originalSize ? 'auto' : (item.frameStyle === 'polaroid' ? '250px' : '200px'),
+                        maxWidth: item.originalSize ? 'none' : '100%',
+                        maxHeight: item.originalSize ? 'none' : '400px'
+                      }}
+                      >                        <img 
+                          src={item.url}
+                          alt="Scrapbook item"
+                          className={`
+                            ${!item.originalSize ? (
+                              ['circle', 'square', 'vintage'].includes(item.frameStyle || '')
+                                ? 'w-full h-full object-cover'
+                                : item.frameStyle === 'polaroid' 
+                                  ? 'w-full h-[calc(100%-40px)] object-cover' 
+                                  : ''
+                            ) : ''}
+                            ${item.originalSize ? 'max-w-none' : ''}
+                          `}                          onLoad={(e) => {
+                            // If using original size, we might need to adjust the container
+                            if (item.originalSize) {
+                              const img = e.target as HTMLImageElement;
+                              const container = img.parentElement as HTMLElement;
+                              if (container) {
+                                // Apply some reasonable constraints to prevent extremely large images from breaking the layout
+                                const maxWidth = Math.min(img.naturalWidth, 1000);
+                                const scaleFactor = maxWidth < img.naturalWidth ? maxWidth / img.naturalWidth : 1;
+                                const width = img.naturalWidth * scaleFactor;
+                                const height = img.naturalHeight * scaleFactor;
+                                
+                                container.style.width = `${width}px`;
+                                container.style.height = item.frameStyle === 'polaroid' 
+                                  ? `${height + 40}px` 
+                                  : `${height}px`;
+                              }
+                            }
+                          }}
+                        />
+                        {item.frameStyle === 'polaroid' && (
+                          <div className="absolute bottom-0 w-full h-10 flex items-center justify-center">
+                            <span className="text-sm text-gray-600 font-handwriting">Memory</span>
+                          </div>
+                        )}
+                      </div>): item.type === 'video' ? (                      <div className={`
+                        relative overflow-hidden
+                        ${item.frameStyle === 'circle' ? 'rounded-full' : ''}
+                        ${item.frameStyle === 'square' ? 'rounded-lg' : ''}
+                        ${item.frameStyle === 'polaroid' ? 'rounded-sm pb-8 bg-white dark:bg-gray-200' : ''}
+                        ${item.frameStyle === 'vintage' ? 'rounded-sm transform rotate-1' : ''}
+                        ${['circle', 'square'].includes(item.frameStyle || '') ? 'border-4 border-white dark:border-gray-700' : ''}
+                        ${item.frameStyle === 'polaroid' ? 'shadow-xl' : ''}
+                        ${item.frameStyle === 'vintage' ? 'border-8 border-white dark:border-gray-200 shadow-xl' : ''}
+                      `}
+                      style={{ 
+                        width: item.originalSize ? 'auto' : (item.frameStyle === 'polaroid' ? '220px' : '200px'), 
+                        height: item.originalSize ? 'auto' : (item.frameStyle === 'polaroid' ? '250px' : '200px'),
+                        maxWidth: item.originalSize ? 'none' : '100%', 
+                        maxHeight: item.originalSize ? 'none' : '400px'
+                      }}
+                      >                        <div className="video-container" style={{ 
+                          width: '100%', 
+                          height: item.frameStyle === 'polaroid' ? 'calc(100% - 40px)' : '100%',
+                          position: 'relative'
+                        }}>                          
+                          <video 
+                            id={`video-${item.id}`}
+                            src={item.url}
+                            className={`touch-manipulation ${item.originalSize ? 'max-w-none' : 'w-full h-full object-cover'}`}
+                            loop
+                            muted={!item.isPlaying}
+                            playsInline
+                            onLoadedMetadata={(e) => {
+                              // If using original size, adjust the container to match video dimensions
+                              if (item.originalSize) {
+                                const video = e.target as HTMLVideoElement;
+                                const container = video.closest('.video-container') as HTMLElement;
+                                const outerContainer = container?.parentElement as HTMLElement;
+                                if (container && outerContainer) {
+                                  // Apply some reasonable constraints to prevent extremely large videos from breaking the layout
+                                  const maxWidth = Math.min(video.videoWidth, 800);
+                                  const scaleFactor = maxWidth < video.videoWidth ? maxWidth / video.videoWidth : 1;
+                                  const width = video.videoWidth * scaleFactor;
+                                  const height = video.videoHeight * scaleFactor;
+                                  
+                                  outerContainer.style.width = `${width}px`;
+                                  outerContainer.style.height = item.frameStyle === 'polaroid'
+                                    ? `${height + 40}px`
+                                    : `${height}px`;
+                                  container.style.height = item.frameStyle === 'polaroid'
+                                    ? `${height}px`
+                                    : `${height}px`;
+                                }
+                              }
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const video = document.getElementById(`video-${item.id}`) as HTMLVideoElement;
+                              if (video) {
+                                if (video.paused) {
+                                  video.play();
+                                  setScrapbookItems(prev => prev.map(i => 
+                                    i.id === item.id ? { ...i, isPlaying: true } : i
+                                  ));
+                                } else {
+                                  video.pause();
+                                  setScrapbookItems(prev => prev.map(i => 
+                                    i.id === item.id ? { ...i, isPlaying: false } : i
+                                  ));
+                                }
+                              }
+                            }}
+                          />                          <div className="absolute inset-0 flex items-center justify-center">
+                            {!item.isPlaying && (
+                              <div 
+                                className="bg-black bg-opacity-60 rounded-full p-2.5 sm:p-2 md:p-2.5 cursor-pointer transform active:scale-90 transition-transform shadow-lg w-14 h-14 sm:w-12 sm:h-12 md:w-14 md:h-14 flex items-center justify-center touch-manipulation backdrop-blur-sm border border-white/20" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const video = document.getElementById(`video-${item.id}`) as HTMLVideoElement;
+                                  if (video) {
+                                    video.play();
+                                    setScrapbookItems(prev => prev.map(i => 
+                                      i.id === item.id ? { ...i, isPlaying: true } : i
+                                    ));
+                                  }
+                                }}
+                                onTouchStart={(e) => {
+                                  // Prevent accidental drag when tapping the play button
+                                  e.stopPropagation();
+                                  // Add visual feedback for touch
+                                  const target = e.currentTarget as HTMLElement;
+                                  target.classList.add('scale-90');
+                                  setTimeout(() => target.classList.remove('scale-90'), 150);
+                                }}
+                                style={{touchAction: 'manipulation'}}
+                              >
+                                <Play size={28} className="w-7 h-7 sm:w-6 sm:h-6 md:w-7 md:h-7" color="white" />
+                              </div>
+                            )}
+                            {item.isPlaying && (
+                              <div 
+                                className="bg-black bg-opacity-60 rounded-full p-2.5 sm:p-2 md:p-2.5 cursor-pointer transform active:scale-90 transition-transform shadow-lg w-14 h-14 sm:w-12 sm:h-12 md:w-14 md:h-14 flex items-center justify-center touch-manipulation backdrop-blur-sm border border-white/20" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const video = document.getElementById(`video-${item.id}`) as HTMLVideoElement;
+                                  if (video) {
+                                    video.pause();
+                                    setScrapbookItems(prev => prev.map(i => 
+                                      i.id === item.id ? { ...i, isPlaying: false } : i
+                                    ));
+                                  }
+                                }}                                onTouchStart={(e) => {
+                                  // Prevent accidental drag when tapping the pause button
+                                  e.stopPropagation();
+                                  // Add visual feedback for touch
+                                  const target = e.currentTarget as HTMLElement;
+                                  target.classList.add('scale-90');
+                                  setTimeout(() => target.classList.remove('scale-90'), 150);
+                                }}
+                                style={{touchAction: 'manipulation'}}
+                              >
+                                <Pause size={24} color="white" />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (                      <div 
+                        className={`
+                          flex flex-col items-center justify-center 
+                          transition-all duration-300 touch-manipulation
+                          ${item.isPlaying ? 'animate-pulse' : ''}
+                          ${item.frameStyle === 'circle' ? 'rounded-full w-20 h-20 sm:w-18 sm:h-18 md:w-20 md:h-20' : ''}
+                          ${item.frameStyle === 'square' ? 'rounded-lg w-20 h-20 sm:w-18 sm:h-18 md:w-20 md:h-20' : ''}
+                          ${item.frameStyle === 'polaroid' ? 'rounded-sm w-24 h-28 sm:w-22 sm:h-24 md:w-24 md:h-28 pb-6' : ''}
+                          ${item.frameStyle === 'vintage' ? 'rounded-sm w-24 h-24 sm:w-20 sm:h-20 md:w-24 md:h-24 transform rotate-2' : ''}
+                          ${['circle', 'square'].includes(item.frameStyle || '') ? 'border-4 border-white dark:border-gray-700' : ''}
+                          ${item.frameStyle === 'polaroid' ? 'shadow-xl bg-white dark:bg-gray-200' : ''}
+                          ${item.frameStyle === 'vintage' ? 'border-8 border-white dark:border-gray-200 shadow-xl' : ''}
+                          bg-gradient-to-br from-yellow-100 to-yellow-300 dark:from-yellow-800 dark:to-yellow-600
+                          transform active:scale-95 hover:shadow-lg
+                          select-none tap-highlight-transparent
+                        `}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleAudio(item.id);
+                        }}
+                        onTouchStart={(e) => {
+                          // Prevent accidental drag when tapping the audio button
+                          e.stopPropagation();
+                          // Add visual feedback for touch
+                          const target = e.currentTarget as HTMLElement;
+                          target.classList.add('scale-95');
+                          setTimeout(() => target.classList.remove('scale-95'), 150);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleToggleAudio(item.id);
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={item.isPlaying ? "Pause audio" : "Play audio"}
+                        style={{touchAction: 'manipulation'}}
+                      >
+                        {/* Hidden audio element */}
+                        <audio 
+                          src={item.url} 
+                          id={`audio-${item.id}`}
+                          preload="metadata"
+                          onEnded={() => {
+                            setScrapbookItems(prev => prev.map(i => 
+                              i.id === item.id ? { ...i, isPlaying: false } : i
+                            ));
+                          }} 
+                        />
+                        
+                        {/* Emoji button */}
+                        <div className={`text-3xl sm:text-2xl md:text-3xl cursor-pointer transform hover:scale-110 transition-transform ${item.isPlaying ? 'scale-110 animate-pulse' : ''}`}>
+                          {item.isPlaying ? '🔊' : '🔈'}
+                        </div>
+                        
+                        {/* Audio label */}
+                        <div className="mt-1 text-xs text-center text-gray-800 dark:text-gray-200 font-medium">
+                          {item.isPlaying ? 'Tap to pause' : 'Tap to play'}
+                        </div>
+                        
+                        {item.frameStyle === 'polaroid' && (
+                          <div className="absolute bottom-0 w-full h-6 flex items-center justify-center bg-white dark:bg-gray-200">
+                            <span className="text-xs text-gray-600 font-handwriting">Audio clip</span>
+                          </div>
+                        )}
+                      </div>
+                    )}                    {/* Controls for the item */}                    <div className="absolute -bottom-12 xs:-bottom-10 md:-bottom-8 left-0 right-0 flex justify-center flex-wrap gap-1.5 md:gap-1 item-controls bg-white bg-opacity-60 dark:bg-gray-800 dark:bg-opacity-60 p-1.5 rounded-full backdrop-blur-sm border border-gray-100 dark:border-gray-700 shadow-lg">
+                      {/* Group for rotation controls */}
+                      <div className="flex space-x-1.5 xs:space-x-1">
+                        <button 
+                          onClick={() => handleRotateItem(item.id, 'left')}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          ↶
+                        </button>
+                        <button 
+                          onClick={() => handleRotateItem(item.id, 'right')}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          ↷
+                        </button>
+                      </div>
+
+                      {/* Group for scaling controls */}
+                      <div className="flex space-x-1.5 xs:space-x-1">
+                        <button 
+                          onClick={() => handleScaleItem(item.id, -0.1)}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          -
+                        </button>
+                        <button 
+                          onClick={() => handleScaleItem(item.id, 0.1)}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          +
+                        </button>
+                      </div>                      {/* Group for frame style controls */}
+                      <div className="flex space-x-1.5 xs:space-x-1">
+                        <button 
+                          onClick={() => handleFrameStyleChange(item.id, 'circle')}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          ◯
+                        </button>
+                        <button 
+                          onClick={() => handleFrameStyleChange(item.id, 'square')}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          ◻
+                        </button>
+                        <button 
+                          onClick={() => handleFrameStyleChange(item.id, 'polaroid')}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          📸
+                        </button>
+                        <button 
+                          onClick={() => handleFrameStyleChange(item.id, 'vintage')}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          🕰
+                        </button>
+                      </div>
+                        {/* Additional controls */}
+                      <div className="flex space-x-1.5 xs:space-x-1">
+                        {(item.type === 'image' || item.type === 'video') && (
+                        <button 
+                          onClick={() => toggleOriginalSize(item.id)}
+                          className={`w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full ${item.originalSize ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-800'} shadow-sm flex items-center justify-center text-xs font-bold hover:bg-primary-400 active:scale-95 transition-transform touch-manipulation`}
+                          title={item.originalSize ? "Use fixed size" : "Use original size"}
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          {item.originalSize ? '1:1' : '↕️'}
+                        </button>
+                      )}                      
+                      {item.originalSize && (
+                        <button 
+                          onClick={() => {
+                            setScrapbookItems(prev => prev.map(i => 
+                              i.id === item.id ? { 
+                                ...i, 
+                                position: { x: 100, y: 100 },
+                                rotation: 0
+                              } : i
+                            ));
+                          }}
+                          className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-white dark:bg-gray-800 shadow-sm flex items-center justify-center text-xs font-bold hover:bg-gray-100 dark:hover:bg-gray-700 active:scale-95 transition-transform touch-manipulation"
+                          title="Center this item"
+                          onTouchStart={(e) => e.stopPropagation()}
+                        >
+                          🎯
+                        </button>
+                      )}
+                        {/* Delete button */}
+                      <button 
+                        onClick={() => handleDeleteItem(item.id)}
+                        className="w-9 h-9 xs:w-8 xs:h-8 md:w-6 md:h-6 rounded-full bg-red-50 dark:bg-red-900 shadow-sm flex items-center justify-center text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-800 active:scale-95 transition-transform touch-manipulation"
+                        title="Delete this item"
+                        onTouchStart={(e) => e.stopPropagation()}                      >
+                        <Trash2 size={16} className="w-4 h-4 sm:w-3.5 sm:h-3.5 md:w-3 md:h-3" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              </>
+            )}
+            </div>
+          </div>
+        </CardBody>
+        <CardFooter className="p-3 sm:p-4">
+          <div className="flex flex-wrap gap-3 justify-center sm:justify-start">
+            <Button 
+              variant="outline"
+              leftIcon={<Image size={16} className="hidden xs:inline" />}
+              title={`${useOriginalSize ? "Will use original dimensions" : "Will use standard size"} (Up to 500MB)`}
+              onClick={() => {
+                if (fileInputRef.current) {
+                  fileInputRef.current.accept = "image/jpeg,image/png,image/gif,image/webp,image/bmp,image/tiff,image/svg+xml,image/heic,image/jfif,image/avif";
+                  fileInputRef.current.click();
+                }
+              }}
+              disabled={isSaving}
+              className="py-2.5 px-4 sm:py-2 sm:px-3 text-sm sm:text-base active:scale-95 transform transition-transform touch-manipulation shadow-sm"
+              size="sm"
+            >
+              <Image size={16} className="inline xs:hidden mr-1" />
+              {isSaving ? 'Uploading...' : 'Add Image'}
+              {useOriginalSize && <span className="ml-1 text-xs">↕️</span>}
+            </Button>
+            
+            <Button 
+              variant="outline" 
+              leftIcon={<Film size={16} className="hidden xs:inline" />}
+              onClick={() => {
+                if (fileInputRef.current) {
+                  fileInputRef.current.accept = "video/mp4,video/webm,video/quicktime,video/x-msvideo,video/x-ms-wmv,video/mpeg,video/3gpp,video/ogg,video/x-flv,video/x-matroska";
+                  fileInputRef.current.click();
+                }
+              }}
+              disabled={isSaving}
+              title={`${useOriginalSize ? "Will use original dimensions" : "Will use standard size"} (Up to 500MB)`}
+              className="py-2.5 px-4 sm:py-2 sm:px-3 text-sm sm:text-base active:scale-95 transform transition-transform touch-manipulation shadow-sm"
+              size="sm"
+            >
+              <Film size={16} className="inline xs:hidden mr-1" />
+              {isSaving ? 'Uploading...' : 'Add Video'}
+              {useOriginalSize && <span className="ml-1 text-xs">↕️</span>}
+            </Button>
+            
+            {isRecordingAudio ? (
+              <Button
+                variant="danger"
+                leftIcon={<Mic size={16} className="hidden xs:inline" />}
+                onClick={stopAudioRecording}
+                className="animate-pulse relative py-2.5 px-4 sm:py-2 sm:px-3 text-sm sm:text-base active:scale-95 transform transition-transform touch-manipulation shadow-sm"
+                aria-label="Stop recording audio"
+                size="sm"
+              >
+                <Mic size={16} className="inline xs:hidden mr-1" />
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-ping"></span>
+                <span className="relative">Stop</span>
+                {recordingTime > 0 && (
+                  <span className="font-mono bg-red-800 text-white px-1.5 py-0.5 rounded text-xs ml-2">
+                    {`${Math.floor(recordingTime / 60)}:${String(recordingTime % 60).padStart(2, '0')}`}
+                  </span>
+                )}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                leftIcon={<Mic size={16} className="hidden xs:inline" />}
+                onClick={startAudioRecording}
+                aria-label="Record audio"
+                title="Click to record audio that will appear as a cute emoji button"
+                className="py-2.5 px-4 sm:py-2 sm:px-3 text-sm sm:text-base active:scale-95 transform transition-transform touch-manipulation shadow-sm"
+                size="sm"
+              >
+                <Mic size={16} className="inline xs:hidden mr-1" />
+                Record Audio
+              </Button>
+            )}
+            <input 
+              type="file" 
+              ref={fileInputRef}
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+          </div>
+            <div className="text-center sm:text-left mt-4">
+            <div className="flex flex-wrap gap-2 justify-center sm:justify-start">
+              <div className="flex items-center py-1 px-2.5 bg-gray-100 dark:bg-gray-800 rounded-full">
+                <span className="text-xs text-gray-600 dark:text-gray-300">🖱️ Drag or tap to position</span>
+              </div>
+              <div className="flex items-center py-1 px-2.5 bg-gray-100 dark:bg-gray-800 rounded-full">
+                <span className="text-xs text-gray-600 dark:text-gray-300">⚙️ Use controls to adjust</span>
+              </div>
+              <div className="flex items-center py-1 px-2.5 bg-gray-100 dark:bg-gray-800 rounded-full">
+                <span className="text-xs text-gray-600 dark:text-gray-300">🔊 Tap media to play/pause</span>
+              </div>
+            </div>
+            <div className="text-xs text-gray-500 dark:text-gray-400 mt-3 sm:mt-2">
+              Supports files up to 500MB • All common formats accepted
+            </div>
+          </div>
+        </CardFooter>
+      </Card>
+    </div>
+  );
+};
+
+export default ScrapbookPage;
