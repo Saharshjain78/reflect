@@ -10,25 +10,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    // Check if user is already logged in
+    // Check if user is already logged in with session validation
     const checkAuthStatus = async () => {
       try {
         setIsLoading(true);
         const currentUser = await auth.getCurrentUser();
         
-        if (currentUser) {
+        if (currentUser && auth.validateSession()) {
           setUser(currentUser);
           setIsAuthenticated(true);
+        } else {
+          // Session invalid, clear state
+          setUser(null);
+          setIsAuthenticated(false);
         }
       } catch (error) {
         console.error('Authentication check failed', error);
+        setUser(null);
+        setIsAuthenticated(false);
       } finally {
         setIsLoading(false);
       }
     };
 
     checkAuthStatus();
-  }, []);
+
+    // Set up periodic session validation
+    const sessionCheckInterval = setInterval(() => {
+      if (isAuthenticated && !auth.validateSession()) {
+        console.log('Session expired, logging out...');
+        logout();
+      }
+    }, 60000); // Check every minute
+
+    return () => clearInterval(sessionCheckInterval);
+  }, [isAuthenticated]);
 
   const login = async (email: string, password: string): Promise<void> => {
     setIsLoading(true);
@@ -38,6 +54,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsAuthenticated(true);
     } catch (error) {
       console.error('Login failed', error);
+      setUser(null);
+      setIsAuthenticated(false);
       throw error;
     } finally {
       setIsLoading(false);
@@ -52,6 +70,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsAuthenticated(true);
     } catch (error) {
       console.error('Registration failed', error);
+      setUser(null);
+      setIsAuthenticated(false);
       throw error;
     } finally {
       setIsLoading(false);
@@ -61,16 +81,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = async (): Promise<void> => {
     try {
       await auth.logout();
-      setUser(null);
-      setIsAuthenticated(false);
     } catch (error) {
       console.error('Logout failed', error);
-      throw error;
+    } finally {
+      setUser(null);
+      setIsAuthenticated(false);
     }
   };
 
   const updateUserPreferences = async (preferences: Partial<User['preferences']>): Promise<void> => {
-    if (!user) return;
+    if (!user) {
+      throw new Error('No user logged in');
+    }
     
     try {
       const updatedUser = await auth.updateUserPreferences(user.id, preferences);
@@ -81,6 +103,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const validateSession = (): boolean => {
+    return auth.validateSession();
+  };
+
   const value = {
     user,
     isAuthenticated,
@@ -89,6 +115,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     register,
     logout,
     updateUserPreferences,
+    validateSession,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

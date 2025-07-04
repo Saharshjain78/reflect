@@ -3,9 +3,11 @@ import { useLocation } from 'react-router-dom';
 import Navbar from './Navbar';
 import Sidebar from './Sidebar';
 import OfflineIndicator from '../ui/OfflineIndicator';
+import SecurityIndicator from '../security/SecurityIndicator';
 import AchievementJar from '../achievement/AchievementJar';
 import { useTheme } from '../../contexts/ThemeContext';
 import { useAchievements } from '../../contexts/AchievementContext';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -15,6 +17,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const location = useLocation();
   const { darkMode } = useTheme();
   const { achievements, showJar, setShowJar } = useAchievements();
+  const { isAuthenticated } = useAuth();
   const [isOffline, setIsOffline] = React.useState(!navigator.onLine);
   
   // Check if user is on auth pages
@@ -46,6 +49,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           {children}
         </main>
       </div>
+
+      {/* Security Indicator - only show when authenticated */}
+      {isAuthenticated && !isAuthPage && <SecurityIndicator />}
 
       {/* Achievement Jar Modal */}
       <AchievementJar

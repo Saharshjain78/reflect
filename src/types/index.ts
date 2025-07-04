@@ -10,6 +10,7 @@ export interface User {
     darkMode: boolean;
   };
   streak: number;
+  role?: 'user' | 'admin'; // Added role for RBAC
 }
 
 export interface Achievement {
@@ -25,7 +26,7 @@ export interface Achievement {
 
 export interface JournalEntry {
   id: string;
-  userId: string;
+  userId: string; // Critical: Every entry must be associated with a user
   createdAt: string;
   updatedAt: string;
   steps: {
@@ -52,7 +53,7 @@ export interface JournalEntry {
 
 export interface Media {
   id: string;
-  entryId: string;
+  entryId: string; // Links media to specific journal entry
   type: 'image' | 'video' | 'audio';
   url: string;
   thumbnail?: string;
@@ -87,6 +88,7 @@ export interface AuthContextType {
   register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   updateUserPreferences: (preferences: Partial<User['preferences']>) => Promise<void>;
+  validateSession: () => boolean; // Added session validation
 }
 
 export interface JournalContextType {
@@ -106,4 +108,30 @@ export interface JournalContextType {
 export interface ThemeContextType {
   darkMode: boolean;
   toggleDarkMode: () => void;
+}
+
+// Security-related types
+export interface SecurityEvent {
+  event: string;
+  data: any;
+  timestamp: string;
+  userId?: string;
+  service?: string;
+}
+
+export interface SecurityViolation {
+  violation: string;
+  data: any;
+  timestamp: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  service: string;
+}
+
+export interface SessionData {
+  token: string;
+  userId: string;
+  email: string;
+  role: string;
+  loginTime: number;
+  expiresAt: number;
 }
