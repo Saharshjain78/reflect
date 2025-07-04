@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { Home, BookOpen, CalendarDays, ImageIcon, Plus, User, BookMarked } from 'lucide-react';
+import { Home, BookOpen, CalendarDays, ImageIcon, Plus, User, BookMarked, Trophy } from 'lucide-react';
 
 const Sidebar: React.FC = () => {
   const location = useLocation();
@@ -10,6 +10,7 @@ const Sidebar: React.FC = () => {
     { path: '/journal', icon: <BookOpen size={20} />, label: 'Journal' },
     { path: '/calendar', icon: <CalendarDays size={20} />, label: 'Calendar' },
     { path: '/scrapbook', icon: <ImageIcon size={20} />, label: 'Scrapbook' },
+    { path: '/achievements', icon: <Trophy size={20} />, label: 'Achievement Jar' },
     { path: '/reflection', icon: <BookMarked size={20} />, label: 'Reflection' },
     { 
       path: '/new-entry', 
@@ -18,11 +19,6 @@ const Sidebar: React.FC = () => {
       className: 'bg-primary-600 text-white dark:bg-primary-500 hover:bg-primary-700 dark:hover:bg-primary-600'
     }
   ];
-
-  // Remove the conditional scrapbook view check for testing
-  // if (user?.preferences.scrapbookView) {
-  //   navItems.splice(3, 0, { path: '/scrapbook', icon: <ImageIcon size={20} />, label: 'Scrapbook' });
-  // }
 
   // Add profile link at the bottom
   const bottomNavItems = [

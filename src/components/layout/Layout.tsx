@@ -3,7 +3,9 @@ import { useLocation } from 'react-router-dom';
 import Navbar from './Navbar';
 import Sidebar from './Sidebar';
 import OfflineIndicator from '../ui/OfflineIndicator';
+import AchievementJar from '../achievement/AchievementJar';
 import { useTheme } from '../../contexts/ThemeContext';
+import { useAchievements } from '../../contexts/AchievementContext';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -12,6 +14,7 @@ interface LayoutProps {
 const Layout: React.FC<LayoutProps> = ({ children }) => {
   const location = useLocation();
   const { darkMode } = useTheme();
+  const { achievements, showJar, setShowJar } = useAchievements();
   const [isOffline, setIsOffline] = React.useState(!navigator.onLine);
   
   // Check if user is on auth pages
@@ -43,6 +46,18 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           {children}
         </main>
       </div>
+
+      {/* Achievement Jar Modal */}
+      <AchievementJar
+        isVisible={showJar}
+        onClose={() => setShowJar(false)}
+        achievements={achievements}
+        onAddAchievement={() => {
+          setShowJar(false);
+          // Navigate to achievements page - you might want to use navigate here
+          window.location.href = '/achievements';
+        }}
+      />
     </div>
   );
 };

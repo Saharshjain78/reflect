@@ -4,12 +4,14 @@ import { Save, ArrowLeft, Image, Mic, PartyPopper } from 'lucide-react';
 import Button from '../components/ui/Button';
 import Card, { CardHeader, CardBody, CardFooter } from '../components/ui/Card';
 import { useJournal } from '../contexts/JournalContext';
+import { useAchievements } from '../contexts/AchievementContext';
 import LoadingSpinner from '../components/ui/LoadingSpinner';
 
 const JournalEntryForm: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { getEntry, createEntry, updateEntry, analyzeSentiment, isLoading } = useJournal();
+  const { triggerJar } = useAchievements();
   const [activeStep, setActiveStep] = useState(0);
   
   // State for steps content
@@ -141,6 +143,14 @@ const JournalEntryForm: React.FC = () => {
       // Analyze sentiment
       const combinedText = Object.values(steps).join(' ');
       const sentiment = await analyzeSentiment(combinedText);
+      
+      // Check if sentiment is negative and trigger Achievement Jar
+      if (sentiment && sentiment.score < -0.2 && sentiment.label === 'Negative') {
+        // Trigger the Achievement Jar after a short delay
+        setTimeout(() => {
+          triggerJar();
+        }, 1000);
+      }
       
       if (id || entryId) {
         // Update existing entry

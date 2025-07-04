@@ -12,6 +12,17 @@ export interface User {
   streak: number;
 }
 
+export interface Achievement {
+  id: string;
+  title: string;
+  description: string;
+  date: string;
+  feeling?: string;
+  emoji?: string;
+  imageUrl?: string;
+  createdAt: string;
+}
+
 export interface JournalEntry {
   id: string;
   userId: string;
